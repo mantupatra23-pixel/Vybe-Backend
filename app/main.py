@@ -1,5 +1,6 @@
 import os
 import boto3
+import json
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from fastapi import FastAPI, HTTPException
@@ -9,7 +10,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-app = FastAPI(title="Vybe API Engine", version="1.0.0")
+app = FastAPI(title="Vybe AI & API Engine", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -19,14 +20,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# R2 Credentials
+# Credentials
 R2_ACCOUNT_ID = os.getenv("R2_ACCOUNT_ID", "")
 R2_ACCESS_KEY_ID = os.getenv("R2_ACCESS_KEY_ID", "")
 R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY", "")
 R2_BUCKET_NAME = os.getenv("R2_BUCKET_NAME", "vybe-videos")
 R2_PUBLIC_DOMAIN = os.getenv("R2_PUBLIC_DOMAIN", "")
-
-# Neon Database Connection
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 
 def get_db_connection():
@@ -61,13 +60,35 @@ def setup_tables():
                     cdn_url TEXT NOT NULL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
+                CREATE TABLE IF NOT EXISTS quizzes (
+                    id SERIAL PRIMARY KEY,
+                    video_id INT REFERENCES videos(id) ON DELETE CASCADE,
+                    question TEXT NOT NULL,
+                    options JSONB NOT NULL,
+                    correct_index INT NOT NULL
+                );
             """)
             conn.commit()
         conn.close()
 
+# Mock AI Quiz Generator (Template for LLM API integration)
+def generate_ai_quiz(title: str, tags: str):
+    return [
+        {
+            "question": f"What is the primary topic covered in '{title}'?",
+            "options": [title, "General Tech Concept", "Random Trivia", "Advanced Mathematics"],
+            "correct_index": 0
+        },
+        {
+            "question": f"Which tag best classifies this short lesson?",
+            "options": ["#entertainment", tags if tags else "#learning", "#news", "#gaming"],
+            "correct_index": 1
+        }
+    ]
+
 @app.get("/")
 def health_check():
-    return {"status": "ok", "message": "Vybe FastAPI Engine Live with Neon Postgres!"}
+    return {"status": "ok", "message": "Vybe AI Backend is Live!"}
 
 @app.post("/api/v1/videos/generate-upload-url")
 def generate_upload_url(payload: UploadRequest):
@@ -86,14 +107,23 @@ def generate_upload_url(payload: UploadRequest):
         
         public_cdn_url = f"{R2_PUBLIC_DOMAIN.rstrip('/')}/{object_name}"
 
-        # Save metadata to Neon DB
+        # Save metadata & Auto-generate Quiz
         conn = get_db_connection()
         if conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "INSERT INTO videos (title, tags, cdn_url) VALUES (%s, %s, %s)",
+                    "INSERT INTO videos (title, tags, cdn_url) VALUES (%s, %s, %s) RETURNING id;",
                     (payload.title, payload.tags, public_cdn_url)
                 )
+                video_id = cur.fetchone()["id"]
+
+                # Auto Generate AI Quiz Questions
+                quiz_items = generate_ai_quiz(payload.title, payload.tags)
+                for item in quiz_items:
+                    cur.execute(
+                        "INSERT INTO quizzes (video_id, question, options, correct_index) VALUES (%s, %s, %s, %s);",
+                        (video_id, item["question"], json.dumps(item["options"]), item["correct_index"])
+                    )
                 conn.commit()
             conn.close()
 
@@ -119,5 +149,21 @@ def get_video_feed():
         conn.close()
         
         return {"success": True, "videos": videos}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/v1/quizzes/{video_id}")
+def get_quizzes_for_video(video_id: int):
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return {"quizzes": []}
+        
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM quizzes WHERE video_id = %s;", (video_id,))
+            quizzes = cur.fetchall()
+        conn.close()
+        
+        return {"success": True, "quizzes": quizzes}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
