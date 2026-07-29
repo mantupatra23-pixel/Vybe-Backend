@@ -9,7 +9,6 @@ load_dotenv()
 
 app = FastAPI(title="Vybe API Engine", version="1.0.0")
 
-# CORS middleware for Flutter App connection
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -18,11 +17,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Cloudflare R2 Client Setup (S3 Compatible)
 R2_ACCOUNT_ID = os.getenv("R2_ACCOUNT_ID", "")
 R2_ACCESS_KEY_ID = os.getenv("R2_ACCESS_KEY_ID", "")
 R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY", "")
 R2_BUCKET_NAME = os.getenv("R2_BUCKET_NAME", "vybe-videos")
+R2_PUBLIC_DOMAIN = os.getenv("R2_PUBLIC_DOMAIN", "https://pub-vybe.r2.dev")
 
 s3_client = boto3.client(
     "s3",
@@ -45,7 +44,6 @@ def generate_upload_url(payload: UploadRequest):
     try:
         object_name = f"videos/{payload.file_name}"
         
-        # Direct Signed URL (No server-side memory buffering)
         presigned_url = s3_client.generate_presigned_url(
             "put_object",
             Params={
@@ -56,7 +54,7 @@ def generate_upload_url(payload: UploadRequest):
             ExpiresIn=900,
         )
         
-        public_cdn_url = f"https://cdn.vybe.app/{object_name}"
+        public_cdn_url = f"{R2_PUBLIC_DOMAIN.rstrip('/')}/{object_name}"
 
         return {
             "success": True,
