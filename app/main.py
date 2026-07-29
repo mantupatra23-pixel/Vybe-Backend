@@ -13,9 +13,12 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 from gtts import gTTS
 
+# Import Modular Routers
+from app.routers import founder_monetization, b2b_sponsored
+
 load_dotenv()
 
-app = FastAPI(title="Vybe Master Enterprise Engine", version="4.2.1")
+app = FastAPI(title="Vybe Master Enterprise Engine", version="5.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -24,6 +27,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ---------------------------------------------------------
+# Include New Modular Routers (Founder & B2B Monetization)
+# ---------------------------------------------------------
+app.include_router(founder_monetization.router)
+app.include_router(b2b_sponsored.router)
 
 # ---------------------------------------------------------
 # Environment Variables & Configuration
@@ -37,19 +46,15 @@ DATABASE_URL = os.getenv("DATABASE_URL", "")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 REDIS_URL = os.getenv("REDIS_URL", "")
 
-# ---------------------------------------------------------
-# Redis Client Initialization
-# ---------------------------------------------------------
+# Redis Client Setup
 redis_client = None
 if REDIS_URL:
     try:
         redis_client = redis.Redis.from_url(REDIS_URL, decode_responses=True)
     except Exception as e:
-        print(f"Redis Notice: {e}")
+        print(f"Redis Setup Notice: {e}")
 
-# ---------------------------------------------------------
-# Database & Cloud Storage Connections
-# ---------------------------------------------------------
+# Database & S3 Connections
 def get_db_connection():
     if not DATABASE_URL:
         return None
@@ -63,7 +68,6 @@ s3_client = boto3.client(
     region_name="auto",
 )
 
-# Initial Content Seeds
 INITIAL_SEEDS = [
     {
         "title": "What is Artificial Intelligence in 30 Seconds?",
@@ -88,9 +92,7 @@ INITIAL_SEEDS = [
     }
 ]
 
-# ---------------------------------------------------------
-# WebSocket Connection Manager
-# ---------------------------------------------------------
+# WebSocket Manager
 class ConnectionManager:
     def __init__(self):
         self.active_connections: List[WebSocket] = []
@@ -112,9 +114,7 @@ class ConnectionManager:
 
 ws_manager = ConnectionManager()
 
-# ---------------------------------------------------------
-# Pydantic Schemas
-# ---------------------------------------------------------
+# Pydantic Models
 class CreatorWalletRequest(BaseModel):
     creator_name: str
     adsense_id: str
@@ -142,9 +142,7 @@ class ScoreUpdate(BaseModel):
     user_name: str
     xp_gained: int
 
-# ---------------------------------------------------------
-# Helper Functions & Cache Clear
-# ---------------------------------------------------------
+# Cache Helper
 def clear_feed_cache():
     if redis_client:
         try:
@@ -152,6 +150,7 @@ def clear_feed_cache():
         except Exception as e:
             print(f"Redis Cache Clear Error: {e}")
 
+# Groq AI Quiz Function
 def generate_ai_quiz_groq(title: str, tags: str):
     if not GROQ_API_KEY:
         return [
@@ -159,11 +158,6 @@ def generate_ai_quiz_groq(title: str, tags: str):
                 "question": f"What is the main topic covered in '{title}'?",
                 "options": [title, "General Tech Concept", "Trivia", "Overview"],
                 "correct_index": 0
-            },
-            {
-                "question": f"Which tag best classifies this short lesson?",
-                "options": ["#entertainment", tags if tags else "#learning", "#news", "#gaming"],
-                "correct_index": 1
             }
         ]
 
@@ -207,6 +201,7 @@ def generate_ai_quiz_groq(title: str, tags: str):
         }
     ]
 
+# Autonomous AI Video Creation Task
 def generate_auto_video_job(topic: str):
     try:
         file_name = f"auto_{int(os.getpid())}_{topic.replace(' ', '_')}.mp3"
@@ -242,15 +237,12 @@ def generate_auto_video_job(topic: str):
     except Exception as e:
         print(f"Auto-video generation error: {e}")
 
-# ---------------------------------------------------------
-# Database Startup Migration & Table Declarations
-# ---------------------------------------------------------
+# Database Migration & Startup Handler
 @app.on_event("startup")
 def setup_tables_and_seed():
     conn = get_db_connection()
     if conn:
         with conn.cursor() as cur:
-            # 1. Videos Table
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS videos (
                     id SERIAL PRIMARY KEY,
@@ -265,13 +257,11 @@ def setup_tables_and_seed():
                 );
             """)
 
-            # Safe Migrations
             cur.execute("ALTER TABLE videos ADD COLUMN IF NOT EXISTS views INT DEFAULT 0;")
             cur.execute("ALTER TABLE videos ADD COLUMN IF NOT EXISTS likes INT DEFAULT 0;")
             cur.execute("ALTER TABLE videos ADD COLUMN IF NOT EXISTS creator_name TEXT DEFAULT 'Vybe Creator';")
             cur.execute("ALTER TABLE videos ADD COLUMN IF NOT EXISTS audio_track TEXT DEFAULT 'Original Sound';")
 
-            # 2. Creator Wallets & AdSense Table
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS creator_wallets (
                     id SERIAL PRIMARY KEY,
@@ -282,7 +272,6 @@ def setup_tables_and_seed():
                 );
             """)
 
-            # 3. Tips Table
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS tips (
                     id SERIAL PRIMARY KEY,
@@ -293,7 +282,6 @@ def setup_tables_and_seed():
                 );
             """)
 
-            # 4. Quizzes Table
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS quizzes (
                     id SERIAL PRIMARY KEY,
@@ -304,7 +292,6 @@ def setup_tables_and_seed():
                 );
             """)
 
-            # 5. Comments Table
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS comments (
                     id SERIAL PRIMARY KEY,
@@ -315,7 +302,6 @@ def setup_tables_and_seed():
                 );
             """)
 
-            # 6. Audio Library Table
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS audio_library (
                     id SERIAL PRIMARY KEY,
@@ -325,7 +311,6 @@ def setup_tables_and_seed():
                 );
             """)
 
-            # 7. Leaderboard Table
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS leaderboard (
                     id SERIAL PRIMARY KEY,
@@ -337,7 +322,6 @@ def setup_tables_and_seed():
 
             conn.commit()
 
-            # Seed Audio Library
             cur.execute("SELECT COUNT(*) FROM audio_library;")
             if cur.fetchone()["count"] == 0:
                 sample_audios = [
@@ -349,7 +333,6 @@ def setup_tables_and_seed():
                     cur.execute("INSERT INTO audio_library (title, artist, audio_url) VALUES (%s, %s, %s);", (title, artist, url))
                 conn.commit()
 
-            # Seed Initial Videos
             cur.execute("SELECT COUNT(*) FROM videos;")
             if cur.fetchone()["count"] == 0:
                 for seed in INITIAL_SEEDS:
@@ -368,9 +351,7 @@ def setup_tables_and_seed():
 
         conn.close()
 
-# ---------------------------------------------------------
-# WebSockets Endpoint
-# ---------------------------------------------------------
+# WebSocket Endpoint
 @app.websocket("/ws/notifications")
 async def websocket_endpoint(websocket: WebSocket):
     await ws_manager.connect(websocket)
@@ -381,25 +362,28 @@ async def websocket_endpoint(websocket: WebSocket):
         ws_manager.disconnect(websocket)
 
 # ---------------------------------------------------------
-# Core API Endpoints
+# All Core APIs (Preserved & Maintained)
 # ---------------------------------------------------------
 
 @app.get("/")
 def health_check():
-    return {"status": "ok", "message": "Vybe Enterprise Master Engine Active!"}
+    return {
+        "status": "ok",
+        "message": "Vybe Enterprise Master Engine Active!",
+        "version": "5.0.0",
+        "loaded_routers": ["Founder Monetization", "B2B Sponsored Campaigns"]
+    }
 
-# --- OTA Version Check ---
 @app.get("/api/v1/app/latest-version")
 def get_latest_app_version():
     return {
         "success": True,
         "latest_version": "1.0.1",
         "build_number": 2,
-        "release_notes": "Added Creator AdSense Monetization, Wallet Setup, and Instant Tipping!",
+        "release_notes": "Added Creator Monetization, B2B Campaigns & In-App Auto Updates!",
         "download_url": "https://github.com/mantupatra23-pixel/Vybe/releases/latest/download/Vybe-APK.apk"
     }
 
-# --- Video Feed with AdSense metadata & Redis Cache ---
 @app.get("/api/v1/videos/feed")
 def get_video_feed():
     if redis_client:
@@ -438,7 +422,6 @@ def get_video_feed():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# --- Upload URL Generator ---
 @app.post("/api/v1/videos/generate-upload-url")
 async def generate_upload_url(payload: UploadRequest):
     try:
@@ -490,7 +473,6 @@ async def generate_upload_url(payload: UploadRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# --- Creator Wallet & AdSense Setup ---
 @app.post("/api/v1/creator/wallet/update")
 def update_creator_wallet(payload: CreatorWalletRequest):
     try:
@@ -525,7 +507,6 @@ def get_creator_wallet(creator_name: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# --- Direct Tipping Engine ---
 @app.post("/api/v1/creator/tip")
 async def tip_creator(payload: TipRequest):
     try:
@@ -551,7 +532,6 @@ async def tip_creator(payload: TipRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# --- Social Features (Likes, Views, Comments) ---
 @app.post("/api/v1/videos/{video_id}/like")
 async def like_video(video_id: int):
     try:
@@ -627,7 +607,6 @@ async def add_comment(payload: CommentRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# --- Quizzes & Audio Library ---
 @app.get("/api/v1/quizzes/{video_id}")
 def get_quizzes_for_video(video_id: int):
     try:
@@ -656,7 +635,6 @@ def get_audio_library():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# --- Gamification Leaderboard ---
 @app.post("/api/v1/user/score")
 async def update_user_score(payload: ScoreUpdate):
     try:
@@ -695,7 +673,6 @@ def get_leaderboard():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# --- Creator Profile Analytics ---
 @app.get("/api/v1/creator/{creator_name}")
 def get_creator_profile(creator_name: str):
     try:
@@ -724,7 +701,6 @@ def get_creator_profile(creator_name: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# --- Autonomous AI Video Trigger ---
 @app.post("/api/v1/admin/trigger-auto-video")
 def trigger_auto_video(topic: str, background_tasks: BackgroundTasks):
     background_tasks.add_task(generate_auto_video_job, topic)
