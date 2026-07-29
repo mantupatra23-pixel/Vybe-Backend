@@ -7,10 +7,11 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
+from groq import Groq
 
 load_dotenv()
 
-app = FastAPI(title="Vybe AI & API Engine", version="1.0.0")
+app = FastAPI(title="Vybe Groq AI Backend Engine", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -20,13 +21,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Credentials
+# Environment Variables
 R2_ACCOUNT_ID = os.getenv("R2_ACCOUNT_ID", "")
 R2_ACCESS_KEY_ID = os.getenv("R2_ACCESS_KEY_ID", "")
 R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY", "")
 R2_BUCKET_NAME = os.getenv("R2_BUCKET_NAME", "vybe-videos")
 R2_PUBLIC_DOMAIN = os.getenv("R2_PUBLIC_DOMAIN", "")
 DATABASE_URL = os.getenv("DATABASE_URL", "")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+
+# Initialize Groq Client
+groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
 def get_db_connection():
     if not DATABASE_URL:
@@ -71,24 +76,54 @@ def setup_tables():
             conn.commit()
         conn.close()
 
-# Mock AI Quiz Generator (Template for LLM API integration)
-def generate_ai_quiz(title: str, tags: str):
-    return [
-        {
-            "question": f"What is the primary topic covered in '{title}'?",
-            "options": [title, "General Tech Concept", "Random Trivia", "Advanced Mathematics"],
+# Real Groq AI Quiz Generator Function
+def generate_ai_quiz_groq(title: str, tags: str):
+    if not groq_client:
+        return [
+            {
+                "question": f"What is the main topic of '{title}'?",
+                "options": [title, "General Tech", "Trivia", "Other"],
+                "correct_index": 0
+            }
+        ]
+
+    prompt = f"""
+    You are an AI micro-learning assessment engine.
+    Generate exactly 2 multiple-choice questions based on the video title: "{title}" and tags: "{tags}".
+
+    Respond ONLY in raw JSON format without markdown code blocks:
+    [
+        {{
+            "question": "Question text here?",
+            "options": ["Option 0", "Option 1", "Option 2", "Option 3"],
             "correct_index": 0
-        },
-        {
-            "question": f"Which tag best classifies this short lesson?",
-            "options": ["#entertainment", tags if tags else "#learning", "#news", "#gaming"],
-            "correct_index": 1
-        }
+        }}
     ]
+    """
+
+    try:
+        completion = groq_client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.5,
+            response_format={"type": "json_object"} if hasattr(groq_client, "response_format") else None
+        )
+        content = completion.choices[0].message.content
+        data = json.loads(content)
+        return data if isinstance(data, list) else data.get("quizzes", data.get("questions", []))
+    except Exception as e:
+        print(f"Groq AI Generation Error: {e}")
+        return [
+            {
+                "question": f"What concept is explained in '{title}'?",
+                "options": [title, "Basic Intro", "Advanced Concept", "Overview"],
+                "correct_index": 0
+            }
+        ]
 
 @app.get("/")
 def health_check():
-    return {"status": "ok", "message": "Vybe AI Backend is Live!"}
+    return {"status": "ok", "message": "Vybe Groq AI Backend is Live!"}
 
 @app.post("/api/v1/videos/generate-upload-url")
 def generate_upload_url(payload: UploadRequest):
@@ -107,7 +142,6 @@ def generate_upload_url(payload: UploadRequest):
         
         public_cdn_url = f"{R2_PUBLIC_DOMAIN.rstrip('/')}/{object_name}"
 
-        # Save metadata & Auto-generate Quiz
         conn = get_db_connection()
         if conn:
             with conn.cursor() as cur:
@@ -117,12 +151,12 @@ def generate_upload_url(payload: UploadRequest):
                 )
                 video_id = cur.fetchone()["id"]
 
-                # Auto Generate AI Quiz Questions
-                quiz_items = generate_ai_quiz(payload.title, payload.tags)
+                # Generate Real AI Quiz with Groq Llama 3
+                quiz_items = generate_ai_quiz_groq(payload.title, payload.tags)
                 for item in quiz_items:
                     cur.execute(
                         "INSERT INTO quizzes (video_id, question, options, correct_index) VALUES (%s, %s, %s, %s);",
-                        (video_id, item["question"], json.dumps(item["options"]), item["correct_index"])
+                        (video_id, item["question"], json.dumps(item["options"]), item.get("correct_index", 0))
                     )
                 conn.commit()
             conn.close()
