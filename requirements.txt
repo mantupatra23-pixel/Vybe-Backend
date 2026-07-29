@@ -6,4 +6,5 @@ python-dotenv==1.0.1
 psycopg2-binary==2.9.9
 httpx==0.27.0
 gTTS==2.5.1
-moviepy==1.0.3
+redis==5.0.3
+websockets==12.0

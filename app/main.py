@@ -4,8 +4,10 @@ import json
 import psycopg2
 import httpx
 import tempfile
+import redis
+from typing import List
 from psycopg2.extras import RealDictCursor
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -13,7 +15,7 @@ from gtts import gTTS
 
 load_dotenv()
 
-app = FastAPI(title="Vybe Autonomous AI & Gamification Engine", version="2.0.0")
+app = FastAPI(title="Vybe Master Enterprise Engine", version="4.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -23,7 +25,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Credentials
+# ---------------------------------------------------------
+# Environment Variables & Configurations
+# ---------------------------------------------------------
 R2_ACCOUNT_ID = os.getenv("R2_ACCOUNT_ID", "")
 R2_ACCESS_KEY_ID = os.getenv("R2_ACCESS_KEY_ID", "")
 R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY", "")
@@ -31,7 +35,21 @@ R2_BUCKET_NAME = os.getenv("R2_BUCKET_NAME", "vybe-videos")
 R2_PUBLIC_DOMAIN = os.getenv("R2_PUBLIC_DOMAIN", "")
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+REDIS_URL = os.getenv("REDIS_URL", "")
 
+# ---------------------------------------------------------
+# Redis Client Initialization
+# ---------------------------------------------------------
+redis_client = None
+if REDIS_URL:
+    try:
+        redis_client = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+    except Exception as e:
+        print(f"Redis Setup Notice: {e}")
+
+# ---------------------------------------------------------
+# Database & Cloud Storage Connections
+# ---------------------------------------------------------
 def get_db_connection():
     if not DATABASE_URL:
         return None
@@ -45,59 +63,112 @@ s3_client = boto3.client(
     region_name="auto",
 )
 
+# Initial Seeding Content for Cold-Start Problem
+INITIAL_SEEDS = [
+    {
+        "title": "What is Artificial Intelligence in 30 Seconds?",
+        "tags": "#ai #tech #future",
+        "cdn_url": "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4",
+        "creator": "AI Academy",
+        "audio": "Original Sound - AI Academy"
+    },
+    {
+        "title": "Understanding Cloud Infrastructure & Servers",
+        "tags": "#devops #cloud #systemdesign",
+        "cdn_url": "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4",
+        "creator": "DevOps Hub",
+        "audio": "Tech Chill Beats"
+    },
+    {
+        "title": "Python Programming Fundamentals Quick Start",
+        "tags": "#python #coding #learning",
+        "cdn_url": "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerFun.mp4",
+        "creator": "Code Master",
+        "audio": "Lo-Fi Coding Focus"
+    }
+]
+
+# ---------------------------------------------------------
+# WebSocket Connection Manager (Real-time Broadcast)
+# ---------------------------------------------------------
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: List[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+
+    async def broadcast(self, message: dict):
+        for connection in list(self.active_connections):
+            try:
+                await connection.send_json(message)
+            except Exception:
+                self.disconnect(connection)
+
+ws_manager = ConnectionManager()
+
+# ---------------------------------------------------------
+# Pydantic Schemas
+# ---------------------------------------------------------
+class UploadRequest(BaseModel):
+    file_name: str
+    title: str
+    tags: str = ""
+    creator_name: str = "Vybe Creator"
+    audio_track: str = "Original Sound"
+    content_type: str = "video/mp4"
+
+class CommentRequest(BaseModel):
+    video_id: int
+    user_name: str
+    comment_text: str
+
 class ScoreUpdate(BaseModel):
     user_name: str
     xp_gained: int
 
-@app.on_event("startup")
-def setup_tables():
-    conn = get_db_connection()
-    if conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS videos (
-                    id SERIAL PRIMARY KEY,
-                    title TEXT NOT NULL,
-                    tags TEXT,
-                    cdn_url TEXT NOT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                );
-                CREATE TABLE IF NOT EXISTS quizzes (
-                    id SERIAL PRIMARY KEY,
-                    video_id INT REFERENCES videos(id) ON DELETE CASCADE,
-                    question TEXT NOT NULL,
-                    options JSONB NOT NULL,
-                    correct_index INT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS leaderboard (
-                    id SERIAL PRIMARY KEY,
-                    user_name TEXT UNIQUE NOT NULL,
-                    xp INT DEFAULT 0,
-                    quizzes_solved INT DEFAULT 0
-                );
-            """)
-            conn.commit()
-        conn.close()
+# ---------------------------------------------------------
+# Helper Functions & Cache Management
+# ---------------------------------------------------------
+def clear_feed_cache():
+    if redis_client:
+        try:
+            redis_client.delete("cached_video_feed")
+        except Exception as e:
+            print(f"Redis Cache Clear Error: {e}")
 
 def generate_ai_quiz_groq(title: str, tags: str):
     if not GROQ_API_KEY:
-        return [{
-            "question": f"What is the main topic of '{title}'?",
-            "options": [title, "General Tech Concept", "Trivia", "Overview"],
-            "correct_index": 0
-        }]
+        return [
+            {
+                "question": f"What is the main topic covered in '{title}'?",
+                "options": [title, "General Tech Concept", "Trivia", "Overview"],
+                "correct_index": 0
+            },
+            {
+                "question": f"Which tag best classifies this short lesson?",
+                "options": ["#entertainment", tags if tags else "#learning", "#news", "#gaming"],
+                "correct_index": 1
+            }
+        ]
 
     prompt = f"""
-    Generate exactly 2 multiple-choice questions based on: "{title}" with tags "{tags}".
-    Respond ONLY in raw JSON array format without markdown syntax:
+    Generate exactly 2 multiple-choice questions based on video title: "{title}" and tags: "{tags}".
+    Respond ONLY in raw valid JSON array format without markdown syntax:
     [
         {{
-            "question": "Sample Question?",
+            "question": "Sample Question Text?",
             "options": ["Option A", "Option B", "Option C", "Option D"],
             "correct_index": 0
         }}
     ]
     """
+
     try:
         url = "https://api.groq.com/openai/v1/chat/completions"
         headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
@@ -106,9 +177,10 @@ def generate_ai_quiz_groq(title: str, tags: str):
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.5
         }
-        res = httpx.post(url, headers=headers, json=payload, timeout=15.0)
-        if res.status_code == 200:
-            content = res.json()["choices"][0]["message"]["content"]
+
+        response = httpx.post(url, headers=headers, json=payload, timeout=15.0)
+        if response.status_code == 200:
+            content = response.json()["choices"][0]["message"]["content"]
             if "```json" in content:
                 content = content.split("```json")[1].split("```")[0].strip()
             elif "```" in content:
@@ -117,37 +189,35 @@ def generate_ai_quiz_groq(title: str, tags: str):
     except Exception as e:
         print(f"Groq API Error: {e}")
 
-    return [{
-        "question": f"What is explained in '{title}'?",
-        "options": [title, "Basic Intro", "Advanced Concept", "Overview"],
-        "correct_index": 0
-    }]
+    return [
+        {
+            "question": f"What core topic is addressed in '{title}'?",
+            "options": [title, "Basic Fundamentals", "Advanced Concept", "General Tech"],
+            "correct_index": 0
+        }
+    ]
 
-# Autonomous Video Creator Logic
+# Autonomous AI Video Creator Background Job
 def generate_auto_video_job(topic: str):
     try:
         file_name = f"auto_{int(os.getpid())}_{topic.replace(' ', '_')}.mp3"
         object_key = f"videos/{file_name}"
 
-        # 1. Generate Voiceover using gTTS
         tts = gTTS(text=f"Welcome to today's micro lesson on {topic}. AI technology is evolving rapidly. Stay tuned for quick quizzes!", lang='en')
         
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
             tts.save(tmp.name)
-            
-            # 2. Direct Upload Audio/Video stream to R2
             s3_client.upload_file(tmp.name, R2_BUCKET_NAME, object_key, ExtraArgs={"ContentType": "audio/mpeg"})
             os.remove(tmp.name)
 
         public_cdn_url = f"{R2_PUBLIC_DOMAIN.rstrip('/')}/{object_key}"
 
-        # 3. Insert into Database & Generate AI Quiz
         conn = get_db_connection()
         if conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "INSERT INTO videos (title, tags, cdn_url) VALUES (%s, %s, %s) RETURNING id;",
-                    (f"AI Lesson: {topic.title()}", "#auto #ai #learning", public_cdn_url)
+                    "INSERT INTO videos (title, tags, cdn_url, creator_name, audio_track) VALUES (%s, %s, %s, %s, %s) RETURNING id;",
+                    (f"AI Lesson: {topic.title()}", "#auto #ai #learning", public_cdn_url, "Autonomous AI Bot", "AI Voiceover Track")
                 )
                 video_id = cur.fetchone()["id"]
                 quiz_items = generate_ai_quiz_groq(topic, "#auto #ai")
@@ -158,20 +228,122 @@ def generate_auto_video_job(topic: str):
                     )
                 conn.commit()
             conn.close()
+
+            clear_feed_cache()
     except Exception as e:
         print(f"Auto-video generation error: {e}")
 
+# ---------------------------------------------------------
+# Startup Setup & Database Tables
+# ---------------------------------------------------------
+@app.on_event("startup")
+def setup_tables_and_seed():
+    conn = get_db_connection()
+    if conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS videos (
+                    id SERIAL PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    tags TEXT,
+                    cdn_url TEXT NOT NULL,
+                    views INT DEFAULT 0,
+                    likes INT DEFAULT 0,
+                    creator_name TEXT DEFAULT 'Vybe Creator',
+                    audio_track TEXT DEFAULT 'Original Sound',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE IF NOT EXISTS quizzes (
+                    id SERIAL PRIMARY KEY,
+                    video_id INT REFERENCES videos(id) ON DELETE CASCADE,
+                    question TEXT NOT NULL,
+                    options JSONB NOT NULL,
+                    correct_index INT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS comments (
+                    id SERIAL PRIMARY KEY,
+                    video_id INT REFERENCES videos(id) ON DELETE CASCADE,
+                    user_name TEXT NOT NULL,
+                    comment_text TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE IF NOT EXISTS audio_library (
+                    id SERIAL PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    artist TEXT NOT NULL,
+                    audio_url TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS leaderboard (
+                    id SERIAL PRIMARY KEY,
+                    user_name TEXT UNIQUE NOT NULL,
+                    xp INT DEFAULT 0,
+                    quizzes_solved INT DEFAULT 0
+                );
+            """)
+            conn.commit()
+
+            # Seed Royalty-Free Audio Library
+            cur.execute("SELECT COUNT(*) FROM audio_library;")
+            if cur.fetchone()["count"] == 0:
+                sample_audios = [
+                    ("Lofi Beats - Chill Tech", "NCS Music", "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3"),
+                    ("Upbeat Cyberpunk Vibe", "RoyaltyFree", "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3"),
+                    ("Coding Ambient Focus", "Acoustic Tech", "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-3.mp3")
+                ]
+                for title, artist, url in sample_audios:
+                    cur.execute("INSERT INTO audio_library (title, artist, audio_url) VALUES (%s, %s, %s);", (title, artist, url))
+                conn.commit()
+
+            # Seed Initial Videos
+            cur.execute("SELECT COUNT(*) FROM videos;")
+            if cur.fetchone()["count"] == 0:
+                print("Seeding initial automated video content...")
+                for seed in INITIAL_SEEDS:
+                    cur.execute(
+                        "INSERT INTO videos (title, tags, cdn_url, creator_name, audio_track) VALUES (%s, %s, %s, %s, %s) RETURNING id;",
+                        (seed["title"], seed["tags"], seed["cdn_url"], seed["creator"], seed["audio"])
+                    )
+                    video_id = cur.fetchone()["id"]
+                    quiz_items = generate_ai_quiz_groq(seed["title"], seed["tags"])
+                    for item in quiz_items:
+                        cur.execute(
+                            "INSERT INTO quizzes (video_id, question, options, correct_index) VALUES (%s, %s, %s, %s);",
+                            (video_id, item["question"], json.dumps(item["options"]), item.get("correct_index", 0))
+                        )
+                conn.commit()
+
+        conn.close()
+
+# ---------------------------------------------------------
+# WebSockets Endpoint
+# ---------------------------------------------------------
+@app.websocket("/ws/notifications")
+async def websocket_endpoint(websocket: WebSocket):
+    await ws_manager.connect(websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        ws_manager.disconnect(websocket)
+
+# ---------------------------------------------------------
+# Core API Routes
+# ---------------------------------------------------------
 @app.get("/")
 def health_check():
-    return {"status": "ok", "message": "Vybe AI Generator & Gamification Engine Active!"}
+    return {"status": "ok", "message": "Vybe Enterprise Engine v4.0 Master Active!"}
 
-@app.post("/api/v1/admin/trigger-auto-video")
-def trigger_auto_video(topic: str, background_tasks: BackgroundTasks):
-    background_tasks.add_task(generate_auto_video_job, topic)
-    return {"success": True, "message": f"Autonomous video generation started for '{topic}'"}
-
+# Video Feed (With Upstash Redis Caching)
 @app.get("/api/v1/videos/feed")
 def get_video_feed():
+    if redis_client:
+        try:
+            cached_data = redis_client.get("cached_video_feed")
+            if cached_data:
+                return {"success": True, "source": "redis_cache", "videos": json.loads(cached_data)}
+        except Exception as e:
+            print(f"Redis Cache Hit Error: {e}")
+
     try:
         conn = get_db_connection()
         if not conn:
@@ -180,10 +352,74 @@ def get_video_feed():
             cur.execute("SELECT * FROM videos ORDER BY created_at DESC;")
             videos = cur.fetchall()
         conn.close()
-        return {"success": True, "videos": videos}
+
+        for video in videos:
+            if "created_at" in video:
+                video["created_at"] = str(video["created_at"])
+
+        if redis_client:
+            try:
+                redis_client.setex("cached_video_feed", 60, json.dumps(videos))
+            except Exception as e:
+                print(f"Redis Set Cache Error: {e}")
+
+        return {"success": True, "source": "database", "videos": videos}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# Presigned Upload URL Generator
+@app.post("/api/v1/videos/generate-upload-url")
+async def generate_upload_url(payload: UploadRequest):
+    try:
+        object_name = f"videos/{payload.file_name}"
+        
+        presigned_url = s3_client.generate_presigned_url(
+            "put_object",
+            Params={
+                "Bucket": R2_BUCKET_NAME,
+                "Key": object_name,
+                "ContentType": payload.content_type,
+            },
+            ExpiresIn=900,
+        )
+        
+        public_cdn_url = f"{R2_PUBLIC_DOMAIN.rstrip('/')}/{object_name}"
+
+        conn = get_db_connection()
+        if conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO videos (title, tags, cdn_url, creator_name, audio_track) VALUES (%s, %s, %s, %s, %s) RETURNING id;",
+                    (payload.title, payload.tags, public_cdn_url, payload.creator_name, payload.audio_track)
+                )
+                video_id = cur.fetchone()["id"]
+
+                quiz_items = generate_ai_quiz_groq(payload.title, payload.tags)
+                for item in quiz_items:
+                    cur.execute(
+                        "INSERT INTO quizzes (video_id, question, options, correct_index) VALUES (%s, %s, %s, %s);",
+                        (video_id, item["question"], json.dumps(item["options"]), item.get("correct_index", 0))
+                    )
+                conn.commit()
+            conn.close()
+
+        clear_feed_cache()
+        await ws_manager.broadcast({
+            "type": "NEW_VIDEO",
+            "message": f"New lesson published: {payload.title}",
+            "cdn_url": public_cdn_url
+        })
+
+        return {
+            "success": True,
+            "upload_url": presigned_url,
+            "file_path": object_name,
+            "cdn_url": public_cdn_url
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Quizzes Endpoint
 @app.get("/api/v1/quizzes/{video_id}")
 def get_quizzes_for_video(video_id: int):
     try:
@@ -198,9 +434,100 @@ def get_quizzes_for_video(video_id: int):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# Leaderboard & XP APIs
+# Social Features (Likes, Views, Comments)
+@app.post("/api/v1/videos/{video_id}/like")
+async def like_video(video_id: int):
+    try:
+        conn = get_db_connection()
+        if conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE videos SET likes = likes + 1 WHERE id = %s RETURNING likes, title;", (video_id,))
+                res = cur.fetchone()
+                updated_likes = res["likes"]
+                title = res["title"]
+                conn.commit()
+            conn.close()
+
+            clear_feed_cache()
+            await ws_manager.broadcast({
+                "type": "LIKE_UPDATE",
+                "message": f"Someone liked '{title}'!",
+                "video_id": video_id,
+                "likes": updated_likes
+            })
+
+            return {"success": True, "likes": updated_likes}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/v1/videos/{video_id}/view")
+def increment_view(video_id: int):
+    try:
+        conn = get_db_connection()
+        if conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE videos SET views = views + 1 WHERE id = %s;", (video_id,))
+                conn.commit()
+            conn.close()
+            return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/v1/videos/{video_id}/comments")
+def get_comments(video_id: int):
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return {"comments": []}
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM comments WHERE video_id = %s ORDER BY created_at DESC;", (video_id,))
+            comments = cur.fetchall()
+        conn.close()
+        return {"success": True, "comments": comments}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/v1/videos/comments/add")
+async def add_comment(payload: CommentRequest):
+    try:
+        conn = get_db_connection()
+        if conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO comments (video_id, user_name, comment_text) VALUES (%s, %s, %s);",
+                    (payload.video_id, payload.user_name, payload.comment_text)
+                )
+                conn.commit()
+            conn.close()
+
+            await ws_manager.broadcast({
+                "type": "NEW_COMMENT",
+                "message": f"{payload.user_name} commented: {payload.comment_text}",
+                "video_id": payload.video_id
+            })
+
+            return {"success": True, "message": "Comment posted!"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Audio Library
+@app.get("/api/v1/audio/library")
+def get_audio_library():
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return {"tracks": []}
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM audio_library;")
+            tracks = cur.fetchall()
+        conn.close()
+        return {"success": True, "tracks": tracks}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Gamification & XP Leaderboard
 @app.post("/api/v1/user/score")
-def update_user_score(payload: ScoreUpdate):
+async def update_user_score(payload: ScoreUpdate):
     try:
         conn = get_db_connection()
         if conn:
@@ -213,6 +540,12 @@ def update_user_score(payload: ScoreUpdate):
                 """, (payload.user_name, payload.xp_gained, payload.xp_gained))
                 conn.commit()
             conn.close()
+
+            await ws_manager.broadcast({
+                "type": "LEADERBOARD_UPDATE",
+                "message": f"{payload.user_name} just earned +{payload.xp_gained} XP! ⚡"
+            })
+
             return {"success": True, "message": "XP updated successfully!"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -230,3 +563,38 @@ def get_leaderboard():
         return {"success": True, "leaderboard": ranks}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# Creator Profile Analytics
+@app.get("/api/v1/creator/{creator_name}")
+def get_creator_profile(creator_name: str):
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return {"profile": {}}
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT 
+                    COUNT(*) as total_videos, 
+                    COALESCE(SUM(views), 0) as total_views, 
+                    COALESCE(SUM(likes), 0) as total_likes 
+                FROM videos WHERE creator_name = %s;
+            """, (creator_name,))
+            stats = cur.fetchone()
+            
+            cur.execute("SELECT * FROM videos WHERE creator_name = %s ORDER BY created_at DESC;", (creator_name,))
+            uploaded_videos = cur.fetchall()
+        conn.close()
+        
+        return {
+            "success": True,
+            "stats": stats,
+            "videos": uploaded_videos
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Autonomous AI Video Generation Trigger
+@app.post("/api/v1/admin/trigger-auto-video")
+def trigger_auto_video(topic: str, background_tasks: BackgroundTasks):
+    background_tasks.add_task(generate_auto_video_job, topic)
+    return {"success": True, "message": f"Autonomous video generation started for '{topic}'"}
