@@ -609,3 +609,16 @@ def get_creator_profile(creator_name: str):
 def trigger_auto_video(topic: str, background_tasks: BackgroundTasks):
     background_tasks.add_task(generate_auto_video_job, topic)
     return {"success": True, "message": f"Autonomous video generation started for '{topic}'"}
+
+# ---------------------------------------------------------
+# OTA Auto-Update Version Endpoint
+# ---------------------------------------------------------
+@app.get("/api/v1/app/latest-version")
+def get_latest_app_version():
+    return {
+        "success": True,
+        "latest_version": "1.0.1",
+        "build_number": 2,
+        "release_notes": "Added Upstash Redis Caching, WebSockets, and Auto-Updater!",
+        "download_url": "https://github.com/mantupatra23-pixel/Vybe/releases/latest/download/Vybe-APK.apk"
+    }
