@@ -15,7 +15,7 @@ from gtts import gTTS
 
 load_dotenv()
 
-app = FastAPI(title="Vybe Master Enterprise Engine", version="4.0.0")
+app = FastAPI(title="Vybe Master Enterprise Engine", version="4.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -234,13 +234,14 @@ def generate_auto_video_job(topic: str):
         print(f"Auto-video generation error: {e}")
 
 # ---------------------------------------------------------
-# Startup Setup & Database Tables
+# Startup Setup & Database Tables (With Safe Migrations)
 # ---------------------------------------------------------
 @app.on_event("startup")
 def setup_tables_and_seed():
     conn = get_db_connection()
     if conn:
         with conn.cursor() as cur:
+            # Create Videos Table
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS videos (
                     id SERIAL PRIMARY KEY,
@@ -253,6 +254,16 @@ def setup_tables_and_seed():
                     audio_track TEXT DEFAULT 'Original Sound',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
+            """)
+
+            # SAFE MIGRATION: Auto Add missing columns if videos table already existed
+            cur.execute("ALTER TABLE videos ADD COLUMN IF NOT EXISTS views INT DEFAULT 0;")
+            cur.execute("ALTER TABLE videos ADD COLUMN IF NOT EXISTS likes INT DEFAULT 0;")
+            cur.execute("ALTER TABLE videos ADD COLUMN IF NOT EXISTS creator_name TEXT DEFAULT 'Vybe Creator';")
+            cur.execute("ALTER TABLE videos ADD COLUMN IF NOT EXISTS audio_track TEXT DEFAULT 'Original Sound';")
+
+            # Create Other Tables
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS quizzes (
                     id SERIAL PRIMARY KEY,
                     video_id INT REFERENCES videos(id) ON DELETE CASCADE,
@@ -331,7 +342,7 @@ async def websocket_endpoint(websocket: WebSocket):
 # ---------------------------------------------------------
 @app.get("/")
 def health_check():
-    return {"status": "ok", "message": "Vybe Enterprise Engine v4.0 Master Active!"}
+    return {"status": "ok", "message": "Vybe Enterprise Engine v4.1 Master Active!"}
 
 # Video Feed (With Upstash Redis Caching)
 @app.get("/api/v1/videos/feed")
