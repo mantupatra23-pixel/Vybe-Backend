@@ -2,12 +2,12 @@ import os
 import boto3
 import json
 import psycopg2
+import httpx
 from psycopg2.extras import RealDictCursor
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
-from groq import Groq
 
 load_dotenv()
 
@@ -21,7 +21,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Environment Variables
+# Credentials
 R2_ACCOUNT_ID = os.getenv("R2_ACCOUNT_ID", "")
 R2_ACCESS_KEY_ID = os.getenv("R2_ACCESS_KEY_ID", "")
 R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY", "")
@@ -29,9 +29,6 @@ R2_BUCKET_NAME = os.getenv("R2_BUCKET_NAME", "vybe-videos")
 R2_PUBLIC_DOMAIN = os.getenv("R2_PUBLIC_DOMAIN", "")
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-
-# Initialize Groq Client
-groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
 def get_db_connection():
     if not DATABASE_URL:
@@ -76,13 +73,13 @@ def setup_tables():
             conn.commit()
         conn.close()
 
-# Real Groq AI Quiz Generator Function
+# Direct Lightweight HTTP REST Call to Groq API (Bypasses SDK proxy bug)
 def generate_ai_quiz_groq(title: str, tags: str):
-    if not groq_client:
+    if not GROQ_API_KEY:
         return [
             {
                 "question": f"What is the main topic of '{title}'?",
-                "options": [title, "General Tech", "Trivia", "Other"],
+                "options": [title, "General Tech Concept", "Trivia", "Overview"],
                 "correct_index": 0
             }
         ]
@@ -91,39 +88,55 @@ def generate_ai_quiz_groq(title: str, tags: str):
     You are an AI micro-learning assessment engine.
     Generate exactly 2 multiple-choice questions based on the video title: "{title}" and tags: "{tags}".
 
-    Respond ONLY in raw JSON format without markdown code blocks:
+    Respond ONLY in raw valid JSON array format like this without markdown blocks:
     [
         {{
-            "question": "Question text here?",
-            "options": ["Option 0", "Option 1", "Option 2", "Option 3"],
+            "question": "Sample Question Text?",
+            "options": ["Option A", "Option B", "Option C", "Option D"],
             "correct_index": 0
         }}
     ]
     """
 
     try:
-        completion = groq_client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.5,
-            response_format={"type": "json_object"} if hasattr(groq_client, "response_format") else None
-        )
-        content = completion.choices[0].message.content
-        data = json.loads(content)
-        return data if isinstance(data, list) else data.get("quizzes", data.get("questions", []))
+        url = "https://api.groq.com/openai/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": "llama-3.1-8b-instant",
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.5
+        }
+
+        response = httpx.post(url, headers=headers, json=payload, timeout=15.0)
+        if response.status_code == 200:
+            res_json = response.json()
+            content = res_json["choices"][0]["message"]["content"]
+            
+            # Clean JSON string if enclosed in backticks
+            if "```json" in content:
+                content = content.split("```json")[1].split("```")[0].strip()
+            elif "```" in content:
+                content = content.split("```")[1].split("```")[0].strip()
+
+            data = json.loads(content)
+            return data if isinstance(data, list) else data.get("quizzes", data.get("questions", []))
     except Exception as e:
-        print(f"Groq AI Generation Error: {e}")
-        return [
-            {
-                "question": f"What concept is explained in '{title}'?",
-                "options": [title, "Basic Intro", "Advanced Concept", "Overview"],
-                "correct_index": 0
-            }
-        ]
+        print(f"Groq API Error: {e}")
+
+    return [
+        {
+            "question": f"What concept is explained in '{title}'?",
+            "options": [title, "Basic Intro", "Advanced Concept", "Overview"],
+            "correct_index": 0
+        }
+    ]
 
 @app.get("/")
 def health_check():
-    return {"status": "ok", "message": "Vybe Groq AI Backend is Live!"}
+    return {"status": "ok", "message": "Vybe Groq REST Engine Live!"}
 
 @app.post("/api/v1/videos/generate-upload-url")
 def generate_upload_url(payload: UploadRequest):
@@ -151,7 +164,7 @@ def generate_upload_url(payload: UploadRequest):
                 )
                 video_id = cur.fetchone()["id"]
 
-                # Generate Real AI Quiz with Groq Llama 3
+                # Generate Real AI Quiz
                 quiz_items = generate_ai_quiz_groq(payload.title, payload.tags)
                 for item in quiz_items:
                     cur.execute(
