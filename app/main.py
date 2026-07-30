@@ -287,7 +287,7 @@ def health_check():
 def get_latest_app_version():
     return {
         "success": True,
-        "latest_version": "1.0.1",
+        "latest_version": "1.0.2",
         "build_number": 2,
         "release_notes": "Master v6.0 with TikTok AI & Real-time Gamification",
         "download_url": "https://github.com/mantu-patra/Vybe/releases"
